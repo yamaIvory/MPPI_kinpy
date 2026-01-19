@@ -3,76 +3,148 @@ from dynamics import Dynamics
 
 class MPPIController:
     def __init__(self, urdf_path):
-        # 1. Kinpy 기반의 Dynamics 객체 생성
         self.dyn = Dynamics(urdf_path)
         
-        # [수정 포인트] Pinocchio 의존성(model.nq) 제거
-        # Kinpy Chain에서 관절 개수(nq)를 직접 가져옵니다.
+        # 로봇 관절 개수 (Kinpy 체인에서 가져옴)
         self.nq = len(self.dyn.chain.get_joint_parameter_names())
-        
-        # 2. MPPI 파라미터 설정 (튜닝 가능)
-        self.horizon = 20       # 얼마나 먼 미래까지 내다볼지 (Step 수)
-        self.n_samples = 50     # 한 번에 몇 개의 시나리오를 뿌릴지
-        self.noise_sigma = 0.1  # 탐색 노이즈 크기 (작으면 정밀, 크면 과감)
-        self.lambda_ = 1.0      # 온도 파라미터
-        
-        # 제어 입력 범위 (관절 속도 rad/s)
-        self.u_min = -1.0
-        self.u_max = 1.0
 
-    def compute_cost(self, q_curr, target_pos):
-        """
-        비용 함수: 목표 지점과의 거리 + (선택) 제어 입력 크기
-        """
-        # 현재 로봇의 끝단 위치 계산 (Kinpy Forward Kinematics)
-        # Dynamics 클래스의 step 메서드를 활용해도 되지만, 여기선 위치만 필요하므로 직접 호출
-        trans = self.dyn.chain.forward_kinematics(q_curr)
-        ee_pos = trans.pos
-        
-        # 목표와의 거리 (유클리드 거리 제곱)
-        dist_cost = 10.0 * np.sum((ee_pos - target_pos)**2)
-        
-        return dist_cost
+        # ---- MPPI Hyperparameters (다이어트 적용됨) ----
+        self.K = 20             # [수정] 샘플 개수 대폭 감소 (500 -> 50)
+        self.N = 10             # [수정] 미래 예측 단계 감소 (30 -> 15)
+        self.dt = 0.1
+        self.dyn.dt = self.dt
+        self.lambda_ = 0.6      
+        self.alpha = 0.3        
 
-    def compute_action(self, q_curr, target_pos):
-        """
-        MPPI 알고리즘의 핵심 루프
-        """
-        # 1. 노이즈 생성 (랜덤한 관절 속도 명령들)
-        # shape: (n_samples, horizon, nq)
-        noise = np.random.normal(0, self.noise_sigma, (self.n_samples, self.horizon, self.nq))
+        # Cost weights (가중치)
+        self.w_pos = 150.0
+        self.w_rot = 20.0
+        self.w_pos_terminal = 300.0
+        self.w_rot_terminal = 50.0
+        self.w_vel = 0.1
+
+        # Noise covariance
+        self.sigma = np.array([1.0]*3 + [0.5]*3)
+        self.sigma_sq = self.sigma**2
+
+        # Nominal control sequence
+        self.U = np.zeros((self.N, 6))
+
+        # 환경 설정
+        self.desk_height = 0.05
+
+    # ---------------------------------------------------
+    # State cost
+    # ---------------------------------------------------
+    def state_cost(self, ee_pos, ee_rot, P_goal, R_goal):
+        pos_err = np.linalg.norm(ee_pos - P_goal)
+        rot_err = 3.0 - np.trace(np.dot(R_goal.T, ee_rot))
+        cost = (self.w_pos * pos_err**2) + (self.w_rot * rot_err)
+        return cost
+   
+    # ---------------------------------------------------
+    # Terminal cost
+    # ---------------------------------------------------
+    def terminal_cost(self, ee_pos, ee_rot, P_goal, R_goal):
+        pos_err = np.linalg.norm(ee_pos - P_goal)
+        rot_err = 3.0 - np.trace(np.dot(R_goal.T, ee_rot))
+        return self.w_pos_terminal*pos_err**2 + self.w_rot_terminal*rot_err
+
+    # --------------------------------------------------- 
+    # Height Cost
+    # ---------------------------------------------------
+    def get_height_cost(self, ee_pos):
+        z_pos = ee_pos[2]
+        if z_pos < self.desk_height:
+            return 1e9 
+        return 0.0
+
+    # --------------------------------------------------- 
+    # Joint Limit Cost
+    # ---------------------------------------------------
+    def get_joint_limit_cost(self, q):
+        margin = 0.05
+        if np.any(q < self.dyn.q_min) or np.any(q > self.dyn.q_max):
+            return 1e9 
         
-        costs = np.zeros(self.n_samples)
-        
-        # 2. 시뮬레이션 (Rollout)
-        # 여러 개의 평행 우주(Sample)를 시뮬레이션 돌려봄
-        for k in range(self.n_samples):
+        diff_lower = (self.dyn.q_min + margin) - q
+        cost_lower = np.sum(np.maximum(0, diff_lower)**2)
+        diff_upper = q - (self.dyn.q_max - margin)
+        cost_upper = np.sum(np.maximum(0, diff_upper)**2)
+
+        w_limit = 100.0
+        return w_limit * (cost_lower + cost_upper)
+
+    # ---------------------------------------------------
+    # MPPI Main Routine
+    # ---------------------------------------------------
+    # [중요] 여기에 R_goal=None이 추가되어야 에러가 안 납니다!
+    def compute_action(self, q_curr, P_goal, R_goal=None):
+        if R_goal is None:
+            R_goal = np.eye(3)
+
+        # 1. 노이즈 생성
+        noise = np.random.normal(loc=0.0, scale=self.sigma, size=(self.K, self.N, 6))
+        costs = np.zeros(self.K)
+
+        # 2. Rollouts
+        for k in range(self.K):
             q_sim = q_curr.copy()
-            
-            for t in range(self.horizon):
-                # 노이즈가 섞인 제어 입력 (u = noise)
-                u = noise[k, t, :]
-                
-                # dynamics.step을 이용해 다음 상태 예측
-                # (q, pos, rot, vel)을 반환하지만, 여기선 q_next만 필요
-                q_next, _, _, _ = self.dyn.step(q_sim, u)
-                
-                # 상태 업데이트
+            S = 0.0 
+
+            for t in range(self.N):
+                u_nom = self.U[t]
+                du = noise[k, t]
+                u = u_nom + du 
+
+                # 속도 클리핑
+                v_limit = 0.5
+                w_limit = 2.0
+                u[:3] = np.clip(u[:3], -v_limit, v_limit)
+                u[3:] = np.clip(u[3:], -w_limit, w_limit)
+
+                # Dynamics Step
+                q_next, ee_pos, ee_rot, _ = self.dyn.step(q_sim, u)
+
+                # 비용 계산
+                h_cost = self.get_height_cost(ee_pos)
+                l_cost = self.get_joint_limit_cost(q_next)
+                s_cost = self.state_cost(ee_pos, ee_rot, P_goal, R_goal)
+                ctrl_cost = self.w_vel * np.sum(u**2)
+
+                S += (s_cost + ctrl_cost) * self.dt + h_cost + l_cost
+
+                # 충돌 시 조기 종료
+                if h_cost > 1e8 or l_cost > 1e8:
+                    S += 1e9 * (self.N - t) 
+                    break 
+
                 q_sim = q_next
-                
-                # 비용 누적 (목표물에 가까울수록 비용이 낮음)
-                costs[k] += self.compute_cost(q_sim, target_pos)
-        
-        # 3. 비용 기반 가중치 계산 (Softmax와 유사)
-        # 비용이 낮은(좋은) 궤적일수록 높은 가중치를 가짐
-        min_cost = np.min(costs)
-        weights = np.exp(-1.0/self.lambda_ * (costs - min_cost))
-        weights /= np.sum(weights) + 1e-10 # 0 나누기 방지
-        
-        # 4. 최적의 제어 입력 계산 (가중 평균)
-        # 시간 t=0 에서의 최적 입력만 구함 (MPC 방식)
-        best_u = np.zeros(self.nq)
-        for k in range(self.n_samples):
-            best_u += weights[k] * noise[k, 0, :]
-            
-        return best_u
+
+            if S < 1e8: 
+                S += self.terminal_cost(ee_pos, ee_rot, P_goal, R_goal)
+
+            costs[k] = S
+
+        # 3. 가중치 계산
+        beta = np.min(costs)
+        weights = np.exp(-1.0/self.lambda_ * (costs - beta))
+        weights /= np.sum(weights) + 1e-10
+
+        # 4. 업데이트
+        delta_U = np.sum(weights[:, None, None] * noise, axis=0)
+        U_new = self.U + delta_U
+        self.U = (1 - self.alpha) * self.U + self.alpha * U_new
+
+        # 최종 출력 제한
+        v_limit = 0.5
+        w_limit = 2.0
+        self.U[:, :3] = np.clip(self.U[:, :3], -v_limit, v_limit)
+        self.U[:, 3:] = np.clip(self.U[:, 3:], -w_limit, w_limit)
+
+        # 5. Shift
+        u_opt = self.U[0].copy()
+        self.U = np.roll(self.U, -1, axis=0)
+        self.U[-1] = np.zeros(6) 
+
+        return u_opt

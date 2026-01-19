@@ -11,7 +11,7 @@ class Dynamics:
         self.chain = kp.build_serial_chain_from_urdf(
             data=urdf_data, 
             root_link_name="BASE", 
-            end_link_name="END_EFFECTOR"  # 혹은 "DUMMY", "gripper_base_link"
+            end_link_name="END_EFFECTOR" 
         )
         
         # 2. 파라미터 설정

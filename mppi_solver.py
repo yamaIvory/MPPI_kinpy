@@ -9,8 +9,8 @@ class MPPIController:
         self.nq = len(self.dyn.chain.get_joint_parameter_names())
 
         # ---- MPPI Hyperparameters (다이어트 적용됨) ----
-        self.K = 20             # [수정] 샘플 개수 대폭 감소 (500 -> 50)
-        self.N = 10             # [수정] 미래 예측 단계 감소 (30 -> 15)
+        self.K = 500             # [수정] 샘플 개수 대폭 감소 (500 -> 50)
+        self.N = 30             # [수정] 미래 예측 단계 감소 (30 -> 15)
         self.dt = 0.1
         self.dyn.dt = self.dt
         self.lambda_ = 0.6      

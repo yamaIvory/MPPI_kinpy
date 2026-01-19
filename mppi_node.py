@@ -130,6 +130,13 @@ class Gen3LiteMPPINode:
             calc_time = rospy.get_time() - start_time
             if calc_time > 0.1: # 0.1초 넘으면 경고
                  rospy.logwarn_throttle(1, f"연산 지연: {calc_time:.3f}초")
+                 # 연산 지연 시 안전 정지
+                 stop_msg = Base_JointSpeeds()
+                 stop_msg.joint_speeds = [JointSpeed(i, 0.0, 0) for i in range(6)]
+                 self.pub_vel.publish(stop_msg)
+                 prev_dq = np.zeros(6)  # 필터 초기화
+                 rate.sleep()
+                 continue
 
             if pos_err < 0.02 and rot_err < 0.1:
                 # 정지 명령

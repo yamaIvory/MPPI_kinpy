@@ -11,11 +11,11 @@ class Dynamics:
         self.chain = kp.build_serial_chain_from_urdf(
             data=urdf_data, 
             root_link_name="BASE", 
-            end_link_name="DUMMY"  # 혹은 "DUMMY", "gripper_base_link"
+            end_link_name="END_EFFECTOR"  # 혹은 "DUMMY", "gripper_base_link"
         )
         
         # 2. 파라미터 설정
-        self.dt = 0.02
+        self.dt = 0.1
         self.damping = 1e-4  # DLS 감쇠 계수
         
         # 3. 관절 위치 한계 (Kinpy는 자동으로 파싱해주지 않으므로 수동 설정 필요)

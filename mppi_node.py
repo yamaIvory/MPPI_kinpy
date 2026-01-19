@@ -116,7 +116,7 @@ class Gen3LiteMPPINode:
                 js = JointSpeed()
                 js.joint_identifier = i
                 js.value = dq_deg[i] # 단위: 도/초 (deg/s)
-                js.duration = 0      # 0이면 다음 명령 올 때까지 유지
+                js.duration = 0 .1     # 0이면 다음 명령 올 때까지 유지
                 msg.joint_speeds.append(js)
             
             self.pub_vel.publish(msg)
